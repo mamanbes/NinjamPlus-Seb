@@ -1999,6 +1999,7 @@ public:
     juce::LookAndFeel& getSamplerKnobLookAndFeel() { return customKnobLookAndFeel; }
     
     juce::Image backgroundImage;
+    juce::Image mixerBackgroundImage;   // separate skin drawn behind the mixer
     juce::Image radioKnobImage;
     juce::Image faderKnobImage;
     juce::Array<juce::File> textureFiles;
@@ -2077,6 +2078,11 @@ private:
     LeftClickOnlyTextButton videoButton{ "Video Room" };
     LeftClickOnlyTextButton samplePadsButton{ "" };
     LeftClickOnlyTextButton chatButton{ "Chat" };
+    // Declutter toggle: styled like the Servers button, pinned to the top-right
+    // corner. Hides every top-bar control so only the mixer is left on screen.
+    LeftClickOnlyTextButton hideChromeButton{ "Hide the crap" };
+    // Second, independent skin selector used only behind the remote mixer.
+    juce::ComboBox mixerBackgroundSelector{ "MixerBackground" };
     
     // Chat
     RichChatDisplayComponent chatDisplay;
@@ -2095,6 +2101,16 @@ private:
     UserListComponent userList;
     std::unique_ptr<juce::DocumentWindow> remoteUsersWindow;
     bool usersPoppedOut = false;
+    int lastMixerPopoutUserCount = -1;   // throttles the mixer popout auto-fit
+    void autoFitRemoteUsersWindow(bool force);
+
+    // Interval/BPI display popout — the readout sits at the very bottom of the
+    // window and can end up off-screen in a short host window, so it can be
+    // popped out into its own always-visible floating window.
+    LeftClickOnlyTextButton intervalPopoutButton{ "Popout" };
+    std::unique_ptr<juce::DocumentWindow> intervalPopoutWindow;
+    bool intervalPoppedOut = false;
+    void intervalPopoutClicked();
 
     FaderLookAndFeel mixerFaderLookAndFeel;
     juce::Label localFaderLabel{ "Local", "You" };
@@ -2166,6 +2182,17 @@ private:
     juce::ComboBox delayDivisionSelector;
     LeftClickOnlyToggleButton delayPingPongButton{ "PingPong" };
     
+    // --- Declutter / layout state ---
+    bool chromeHidden = false;          // "Hide the crap" is engaged
+    bool forceFullRelayout = false;     // bypass the Ableton same-size resize fast path
+    bool masterStripPoppedOut = false;  // master/limiter controls live in a callout
+    bool limiterEnabledBeforeHide = false; // restore point for the forced-off limiter
+    void hideChromeToggled();
+    void setChromeComponentsVisible(bool shouldBeVisible);
+    void applyMixerBackground();
+    void showMasterStripPopup();
+    void reclaimMasterStripComponents();
+
     void connectClicked();
     void sendClicked();
     void transmitToggled();

@@ -41,7 +41,7 @@ public:
 
     // --- Audio-thread write methods (non-blocking, drop on overflow) ---
     void writeMasterBlock(const float* left, const float* right, int numSamples);
-    void writeLocalChannel(int channel, const float* data, int numSamples);
+    void writeLocalChannel(int channel, const float* left, const float* right, int numSamples);
     void writeRemoteUser(int userIndex, const float* left, const float* right, int numSamples);
     void writeRemoteUserInterleaved(int userIndex, const float* interleaved, int numChannels, int numFrames);
     void writeRemoteUserMultichannel(int userIndex, const float* interleaved,

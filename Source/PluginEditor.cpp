@@ -4224,6 +4224,9 @@ public:
             setResizable(true, true);
             setResizeLimits(360, 280, 1200, 900);
         }
+        // Keep the chat popout above the main NinjamPlus window even after the
+        // user clicks back into the plugin/host window.
+        setAlwaysOnTop(true);
         setContentOwned(new ChatPopupComponent(p,
                                                chatWindowColourKey,
                                                std::move(onChatColourSelected),
@@ -6862,6 +6865,9 @@ public:
           abletonHosted(abletonHostedWindow)
     {
         setUsingNativeTitleBar(true);
+        // Keep the mixer popout above the main NinjamPlus window even after the
+        // user clicks back into the plugin/host window.
+        setAlwaysOnTop(true);
         setContentNonOwned(&content, true);
 
         if (abletonHosted)
@@ -6875,8 +6881,12 @@ public:
         else
         {
             setResizable(true, true);
-            setResizeLimits(400, 300, 2400, 1800);
-            centreWithSize(800, 500);
+            setResizeLimits(260, 320, 2400, 1000);
+            // Start at a height that comfortably fits one full vertical
+            // channel strip — the editor immediately auto-fits the WIDTH to
+            // the number of connected users right after construction, since
+            // strips sit side by side in this layout.
+            centreWithSize(420, 460);
         }
         setVisible(true);
     }
@@ -6905,9 +6915,49 @@ public:
         });
     }
 
+    // Lets the editor know whether it's safe to auto-fit this window's size —
+    // Ableton-hosted popouts are intentionally locked to a fixed preset size.
+    bool isAbletonHosted() const { return abletonHosted; }
+
 private:
     std::function<void()> onClosed;
     bool abletonHosted = false;
+};
+
+// Floating window for the beat/interval (BPI) readout, which normally sits at
+// the very bottom of the main window and can end up scrolled off-screen when
+// a host gives the plugin a short window.
+class IntervalPopoutWindow : public juce::DocumentWindow
+{
+public:
+    IntervalPopoutWindow(juce::Component& content, std::function<void()> onClosedCallback)
+        : DocumentWindow("NINJAM Interval", juce::Colours::black, DocumentWindow::closeButton),
+          onClosed(std::move(onClosedCallback))
+    {
+        setUsingNativeTitleBar(true);
+        // Keep this popout above the main NinjamPlus window even after the
+        // user clicks back into the plugin/host window.
+        setAlwaysOnTop(true);
+        setContentNonOwned(&content, true);
+        setResizable(true, true);
+        setResizeLimits(240, 70, 1600, 300);
+        centreWithSize(420, 90);
+        setVisible(true);
+    }
+
+    void closeButtonPressed() override
+    {
+        setVisible(false);
+        auto callback = onClosed;
+        juce::MessageManager::callAsync([callback = std::move(callback)]
+        {
+            if (callback)
+                callback();
+        });
+    }
+
+private:
+    std::function<void()> onClosed;
 };
 
 class SamplePadsWindow : public juce::DocumentWindow,
@@ -8200,6 +8250,14 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     serverListButton.setTooltip("Click to View Servers");
     serverListButton.onClick = [this] { serverListClicked(); };
 
+    // Same widget class / look-and-feel as the Servers button, so it inherits the
+    // active skin automatically.
+    addAndMakeVisible(hideChromeButton);
+    hideChromeButton.setButtonText("Hide the crap");
+    hideChromeButton.setTooltip("Hide everything except the mixer");
+    hideChromeButton.setClickingTogglesState(true);
+    hideChromeButton.onClick = [this] { hideChromeToggled(); };
+
     userLabel.setJustificationType(juce::Justification::centredRight);
     userLabel.setFont(juce::Font(13.0f));
     addAndMakeVisible(userLabel);
@@ -8494,6 +8552,11 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
     usersPopoutButton.setButtonText("Popout");
     usersPopoutButton.setTooltip("Open remote users in a separate floating window");
     usersPopoutButton.onClick = [this] { usersPopoutClicked(); };
+
+    addAndMakeVisible(intervalPopoutButton);
+    intervalPopoutButton.setButtonText("Popout");
+    intervalPopoutButton.setTooltip("Open the beat/interval display in a separate floating window");
+    intervalPopoutButton.onClick = [this] { intervalPopoutClicked(); };
 
     addAndMakeVisible(maxChannelsLabel);
     maxChannelsLabel.setColour(juce::Label::textColourId, juce::Colours::grey);
@@ -9173,6 +9236,43 @@ NinjamVst3AudioProcessorEditor::NinjamVst3AudioProcessorEditor (NinjamVst3AudioP
         repaint();
     };
 
+    // Second background: the mixer can use a different skin from the main window.
+    addAndMakeVisible(mixerBackgroundSelector);
+    mixerBackgroundSelector.setTooltip("Mixer background");
+    mixerBackgroundSelector.addItem("Mixer BG: as GUI", 1);
+    for (int i = 0; i < textureFiles.size(); ++i)
+        mixerBackgroundSelector.addItem(textureFiles[i].getFileName(), i + 2);
+    {
+        juce::String savedMixerTexture;
+        if (settingsFileReady)
+        {
+            auto popts = makeSettingsOptions();
+            juce::PropertiesFile props(popts);
+            savedMixerTexture = props.getValue("mixerTexture", "");
+        }
+        int mixerItemId = 1; // 1 == follow the main GUI skin
+        if (savedMixerTexture.isNotEmpty())
+            for (int i = 0; i < textureFiles.size(); ++i)
+                if (textureFiles[i].getFileName() == savedMixerTexture) { mixerItemId = i + 2; break; }
+        mixerBackgroundSelector.setSelectedId(mixerItemId, juce::dontSendNotification);
+    }
+    mixerBackgroundSelector.onChange = [this, settingsFileReady]
+    {
+        const int idx = mixerBackgroundSelector.getSelectedItemIndex() - 1;
+        if (settingsFileReady)
+        {
+            auto popts = makeSettingsOptions();
+            juce::PropertiesFile props(popts);
+            props.setValue("mixerTexture", (idx >= 0 && idx < textureFiles.size())
+                                               ? textureFiles[idx].getFileName() : juce::String());
+            props.saveIfNeeded();
+        }
+        applyMixerBackground();
+        markPersistentSettingsDirty();
+        repaint();
+    };
+    applyMixerBackground();
+
     addAndMakeVisible(intervalDisplay);
     registerMidiLearnTarget(metronomeSlider, "metronome.level", false);
     registerMidiLearnTarget(transmitButton, "button.transmit", true);
@@ -9309,6 +9409,7 @@ NinjamVst3AudioProcessorEditor::~NinjamVst3AudioProcessorEditor()
     openedSamplePadsMidiInputDeviceId.clear();
     samplePadsWindow.reset();
     remoteUsersWindow.reset();
+    intervalPopoutWindow.reset();
     aboutWindow.reset();
     disconnect();
     atButton.setLookAndFeel(nullptr);
@@ -9592,7 +9693,11 @@ void NinjamVst3AudioProcessorEditor::resized()
     // which has a particularly slow plugin resize path. Other DAWs
     // (Reaper, Studio One, etc.) handle resize smoothly without deferral.
     const bool isAbletonPlugin = !audioProcessor.isStandaloneWrapper() && isAbletonLiveHost();
-    if (isAbletonPlugin && !applyingDeferredResizeLayout)
+    // VST3 / Ableton Live fix: this host fast path bails out whenever the editor
+    // size has not changed. Toggling "Hide the crap" changes the LAYOUT but not the
+    // window size, so without forceFullRelayout the button would silently do
+    // nothing in Ableton while working fine in every other host.
+    if (isAbletonPlugin && !applyingDeferredResizeLayout && !forceFullRelayout)
     {
         const bool hasCompletedInitialLayout = lastLaidOutEditorWidth > 0 && lastLaidOutEditorHeight > 0;
         if (hasCompletedInitialLayout)
@@ -9609,82 +9714,142 @@ void NinjamVst3AudioProcessorEditor::resized()
 
     auto area = getLocalBounds().reduced(10);
 
-    // Bottom: Interval Display
+    // We are doing a real layout pass now, so the one-shot override can be cleared.
+    forceFullRelayout = false;
+
+    const bool hideChrome = chromeHidden;
+
+    // The declutter button is pinned to the very top-right corner and is the one
+    // thing that never hides, otherwise there would be no way back.
+    const int hideBtnW = 112;
+    const int hideBtnH = 26;
+    hideChromeButton.setVisible(true);
+    hideChromeButton.setBounds(area.getRight() - hideBtnW, area.getY(), hideBtnW, hideBtnH);
+    hideChromeButton.toFront(false);
+
+    // Bottom: Interval Display (beat/interval readout stays — it is part of
+    // playing) plus its own popout button, which is always visible regardless
+    // of the declutter state so the BPI counter is never unreachable.
     auto bottomRow = area.removeFromBottom(62);
-    intervalDisplay.setBounds(bottomRow);
-    area.removeFromBottom(10);
-
-    auto topRow = area.removeFromTop(30);
-    // Right side of top row: online clock, record controls, texture / video-bg
-    onlineClockLabel.setBounds(topRow.removeFromRight(180));
-    topRow.removeFromRight(6);
-    backgroundSelector.setBounds(topRow.removeFromRight(130));
-    topRow.removeFromRight(4);
-    videoBgToggle.setBounds(topRow.removeFromRight(80));
-    topRow.removeFromRight(6);
-    recordButton.setBounds(topRow.removeFromRight(56));
-    topRow.removeFromRight(3);
-    recordFolderButton.setBounds(topRow.removeFromRight(66));
-    topRow.removeFromRight(6);
-    // Left side: server fields
-    serverLabel.setBounds(topRow.removeFromLeft(55));
-    serverField.setBounds(topRow.removeFromLeft(140));
-    topRow.removeFromLeft(4);
-    serverListButton.setBounds(topRow.removeFromLeft(68));
-    topRow.removeFromLeft(4);
-    userLabel.setBounds(topRow.removeFromLeft(45));
-    userField.setBounds(topRow.removeFromLeft(80));
-    topRow.removeFromLeft(4);
-    anonymousButton.setBounds(topRow.removeFromLeft(90));
-    if (!anonymousButton.getToggleState())
+    auto intervalPopoutArea = bottomRow.removeFromRight(56);
+    intervalPopoutButton.setVisible(true);
+    intervalPopoutButton.setBounds(intervalPopoutArea.reduced(2, 20));
+    if (intervalPoppedOut)
     {
-        topRow.removeFromLeft(4);
-        passLabel.setBounds(topRow.removeFromLeft(60));
-        passField.setBounds(topRow.removeFromLeft(86));
-        topRow.removeFromLeft(4);
-    }
-    connectButton.setBounds(topRow.removeFromLeft(86));
-    topRow.removeFromLeft(6);
-    statusLabel.setBounds(topRow);
-
-    area.removeFromTop(4);
-
-    // Controls Row: layout, auto-level, metronome, tempo — chat+video buttons on the right
-    auto controlsRow = area.removeFromTop(30);
-    videoButton.setBounds(controlsRow.removeFromRight(100));
-    controlsRow.removeFromRight(5);
-    if (samplePadsButton.isVisible())
-    {
-        samplePadsButton.setBounds(controlsRow.removeFromRight(42));
-        controlsRow.removeFromRight(5);
+        // intervalDisplay is reparented (non-owned) into the popout
+        // DocumentWindow while popped out — it is the SAME component
+        // instance, so calling setVisible(false)/setBounds({}) on it here
+        // would hide it inside the popout window too (this was the "black
+        // window, counter not updating" bug). Leave it alone; the popout
+        // window manages its bounds and visibility on its own.
     }
     else
     {
-        samplePadsButton.setBounds({});
+        intervalDisplay.setVisible(true);
+        intervalDisplay.setBounds(bottomRow);
     }
-    chatButton.setBounds(controlsRow.removeFromRight(80));
-    controlsRow.removeFromRight(10);
-    layoutButton.setBounds(controlsRow.removeFromLeft(40));  // icon-only button
-    controlsRow.removeFromLeft(10);
-    autoLevelButton.setBounds(controlsRow.removeFromLeft(110));
-    controlsRow.removeFromLeft(10);
-    metronomeLabel.setBounds(controlsRow.removeFromLeft(90));
-    metronomeSlider.setBounds(controlsRow.removeFromLeft(80));
-    auto metBtn = controlsRow.removeFromLeft(30);
-    metronomeMuteButton.setBounds(metBtn.reduced(0, 2));
-    controlsRow.removeFromLeft(6);
-    auto syncBtn = controlsRow.removeFromLeft(40);
-    syncButton.setBounds(syncBtn.reduced(0, 2));
-    controlsRow.removeFromLeft(10);
-    fxButton.setBounds(controlsRow.removeFromLeft(70));
-    controlsRow.removeFromLeft(8);
-    optionsButton.setBounds(controlsRow.removeFromLeft(78));
-    controlsRow.removeFromLeft(8);
-    aboutButton.setBounds(controlsRow.removeFromLeft(24));
-    controlsRow.removeFromLeft(8);
-    tempoLabel.setBounds(controlsRow);
+    area.removeFromBottom(10);
 
-    area.removeFromTop(10);
+    // A handful of controls have been removed from the GUI entirely per the
+    // requested redesign. They keep working at whatever value they already
+    // hold — they are just never shown or laid out any more.
+    videoBgToggle.setVisible(false);
+    videoBgToggle.setBounds({});
+    anonymousButton.setVisible(false);
+    anonymousButton.setBounds({});
+    autoLevelButton.setVisible(false);
+    autoLevelButton.setBounds({});
+    layoutButton.setVisible(false);
+    layoutButton.setBounds({});
+
+    setChromeComponentsVisible(!hideChrome);
+
+    if (hideChrome)
+    {
+        // Only reserve the sliver of height the declutter button needs.
+        area.removeFromTop(hideBtnH + 4);
+    }
+    else
+    {
+        auto topRow = area.removeFromTop(30);
+        // Keep clear of the declutter button in the corner
+        topRow.removeFromRight(hideBtnW + 6);
+        // Right side of top row: online clock, skins, record controls, video-bg
+        onlineClockLabel.setBounds(topRow.removeFromRight(170));
+        topRow.removeFromRight(6);
+        backgroundSelector.setBounds(topRow.removeFromRight(120));
+        topRow.removeFromRight(4);
+        mixerBackgroundSelector.setBounds(topRow.removeFromRight(120));
+        topRow.removeFromRight(4);
+        // Video BG is permanently hidden now — no space reserved for it.
+        recordButton.setBounds(topRow.removeFromRight(56));
+        topRow.removeFromRight(3);
+        recordFolderButton.setBounds(topRow.removeFromRight(66));
+        topRow.removeFromRight(6);
+        // Reserve the Connect/Disconnect button's space now, before the
+        // server/user/password fields eat into what's left. Those fields are
+        // free to shrink or get squeezed on a narrow window — the connect
+        // button never should, since there is no other way to connect.
+        const int connectBtnW = 86;
+        auto connectButtonArea = topRow.removeFromRight(connectBtnW);
+        topRow.removeFromRight(6);
+        // Left side: server fields
+        serverLabel.setBounds(topRow.removeFromLeft(55));
+        serverField.setBounds(topRow.removeFromLeft(140));
+        topRow.removeFromLeft(4);
+        serverListButton.setBounds(topRow.removeFromLeft(68));
+        topRow.removeFromLeft(4);
+        userLabel.setBounds(topRow.removeFromLeft(45));
+        userField.setBounds(topRow.removeFromLeft(80));
+        topRow.removeFromLeft(4);
+        // The Anonymous button itself is permanently hidden now, but its
+        // stored toggle state still decides whether the password fields show.
+        if (!anonymousButton.getToggleState())
+        {
+            passLabel.setBounds(topRow.removeFromLeft(60));
+            passField.setBounds(topRow.removeFromLeft(86));
+            topRow.removeFromLeft(4);
+        }
+        connectButton.setBounds(connectButtonArea);
+        statusLabel.setBounds(topRow);
+
+        area.removeFromTop(4);
+
+        // Controls Row: layout, auto-level, metronome, tempo — chat+video on the right
+        auto controlsRow = area.removeFromTop(30);
+        videoButton.setBounds(controlsRow.removeFromRight(100));
+        controlsRow.removeFromRight(5);
+        if (samplePadsButton.isVisible())
+        {
+            samplePadsButton.setBounds(controlsRow.removeFromRight(42));
+            controlsRow.removeFromRight(5);
+        }
+        else
+        {
+            samplePadsButton.setBounds({});
+        }
+        chatButton.setBounds(controlsRow.removeFromRight(80));
+        controlsRow.removeFromRight(10);
+        // Layout toggle (locked to vertical) and Auto-Level are permanently
+        // hidden now — no space reserved for either.
+        metronomeLabel.setBounds(controlsRow.removeFromLeft(90));
+        metronomeSlider.setBounds(controlsRow.removeFromLeft(80));
+        auto metBtn = controlsRow.removeFromLeft(30);
+        metronomeMuteButton.setBounds(metBtn.reduced(0, 2));
+        controlsRow.removeFromLeft(6);
+        auto syncBtn = controlsRow.removeFromLeft(40);
+        syncButton.setBounds(syncBtn.reduced(0, 2));
+        controlsRow.removeFromLeft(10);
+        fxButton.setBounds(controlsRow.removeFromLeft(70));
+        controlsRow.removeFromLeft(8);
+        optionsButton.setBounds(controlsRow.removeFromLeft(78));
+        controlsRow.removeFromLeft(8);
+        aboutButton.setBounds(controlsRow.removeFromLeft(24));
+        controlsRow.removeFromLeft(8);
+        tempoLabel.setBounds(controlsRow);
+
+        area.removeFromTop(10);
+    }
 
     // Keep chat state coherent: if the popout is not actually visible,
     // treat chat as docked when toggled on.
@@ -9708,53 +9873,82 @@ void NinjamVst3AudioProcessorEditor::resized()
                                                      serverMaxLocalChannels > 2 ? serverMaxLocalChannels - 2 : 1);
     numLocal = juce::jlimit(1, maxVisibleLocalChannels, numLocal);
 
-    const bool showSeparateVoiceChannel = serverMaxLocalChannels > 2 && audioProcessor.canUseDedicatedVoiceChatChannel();
+    // The dedicated Voice strip has been removed from the GUI entirely. The voice
+    // engine is untouched — the on/off toggle now lives in the FX menu. Local
+    // channels therefore start in the column the Voice strip used to occupy.
+    voiceChannelNameLabel.setVisible(false);
+    voiceFader.setVisible(false);
+    voicePeakMeter.setVisible(false);
+    voiceInputSelector.setVisible(false);
+    voiceDbLabel.setVisible(false);
+    voiceChatButton.setVisible(false);
+    voiceChannelNameLabel.setBounds({});
+    voiceFader.setBounds({});
+    voicePeakMeter.setBounds({});
+    voiceInputSelector.setBounds({});
+    voiceDbLabel.setBounds({});
+    voiceChatButton.setBounds({});
+    voiceChannelPulseBounds = {};
+
     addLocalChannelButton.setEnabled(maxVisibleLocalChannels > 1 && audioProcessor.getNumLocalChannels() < maxVisibleLocalChannels);
     removeLocalChannelButton.setEnabled(audioProcessor.getNumLocalChannels() > 1);
-    // When popped out, make local channel columns the same width as remote strips (80px).
-    // Otherwise use the normal narrower layout.
-    const int localColWidth = usersPoppedOut ? 80 : 40;
-    int baseLocalWidth = showSeparateVoiceChannel ? 120 : (usersPoppedOut ? 80 : 140);
-    int extraPerTrack = localColWidth;
-    int voiceColumnWidth = showSeparateVoiceChannel ? 62 : 0;
-    int localWidth = baseLocalWidth + voiceColumnWidth + (numLocal - 1) * extraPerTrack;
 
-    // Take the users header from the FULL width before splitting into local/master/user.
-    // This keeps Transmit, Monitor, bitrate, MIDI/OSC, Spread Outputs, and Popout controls
-    // at fixed positions regardless of how many local channels are added.
-    auto usersHeader = area.removeFromTop(26);
-    usersHeader.removeFromLeft(8);
-    // Left to right: Transmit, Monitor, Bitrate (quality), MIDI/OSC, Spread Outputs, Popout
-    transmitButton.setBounds(usersHeader.removeFromLeft(70).withTrimmedTop(2));
-    usersHeader.removeFromLeft(4);
-    localMonitorButton.setBounds(usersHeader.removeFromLeft(80).withTrimmedTop(2));
-    usersHeader.removeFromLeft(10);
-    bitrateSelector.setBounds(usersHeader.removeFromLeft(120).withTrimmedTop(1));
-    usersHeader.removeFromLeft(6);
-    midiRelayTargetSelector.setBounds(usersHeader.removeFromLeft(130).withTrimmedTop(1));
-    usersHeader.removeFromLeft(10);
-    spreadOutputsButton.setBounds(usersHeader.removeFromLeft(118).withTrimmedTop(2));
-    usersHeader.removeFromLeft(6);
-    usersPopoutButton.setBounds(usersHeader.removeFromLeft(60).withTrimmedTop(2));
-    usersHeader.removeFromLeft(6);
-    maxChannelsLabel.setBounds(usersHeader.removeFromLeft(70).withTrimmedTop(2));
-    // Hide the Connected Users label — no longer used
+    // Local strip is kept deliberately narrow so the remote mixer gets the space.
+    const int localColWidth = usersPoppedOut ? 80 : 44;
+    const int baseLocalWidth = usersPoppedOut ? 80 : 104;
+    int localWidth = baseLocalWidth + (numLocal - 1) * localColWidth;
+
+    if (!hideChrome)
+    {
+        // Users header row: Transmit, Monitor, Bitrate, MIDI/OSC, Spread, Popout
+        auto usersHeader = area.removeFromTop(26);
+        usersHeader.removeFromLeft(8);
+        transmitButton.setBounds(usersHeader.removeFromLeft(70).withTrimmedTop(2));
+        usersHeader.removeFromLeft(4);
+        localMonitorButton.setBounds(usersHeader.removeFromLeft(80).withTrimmedTop(2));
+        usersHeader.removeFromLeft(10);
+        bitrateSelector.setBounds(usersHeader.removeFromLeft(120).withTrimmedTop(1));
+        usersHeader.removeFromLeft(6);
+        midiRelayTargetSelector.setBounds(usersHeader.removeFromLeft(130).withTrimmedTop(1));
+        usersHeader.removeFromLeft(10);
+        spreadOutputsButton.setBounds(usersHeader.removeFromLeft(118).withTrimmedTop(2));
+        usersHeader.removeFromLeft(6);
+        usersPopoutButton.setBounds(usersHeader.removeFromLeft(60).withTrimmedTop(2));
+        usersHeader.removeFromLeft(6);
+        maxChannelsLabel.setBounds(usersHeader.removeFromLeft(70).withTrimmedTop(2));
+    }
+    // The "Connected Users" label is never used
     usersLabel.setBounds(juce::Rectangle<int>());
 
-    // Now split the remaining area into local / user / master
-    int masterWidth = 190;
-    int maxLocalWidth;
-    if (usersPoppedOut)
-        maxLocalWidth = area.getWidth() - masterWidth;
-    else
-        maxLocalWidth = area.getWidth() - masterWidth - 200; // leave some room for user area
-    if (maxLocalWidth < 200) maxLocalWidth = 200;
+    // Master / limiter column is gone from the main layout; that width now belongs
+    // to the mixer. The controls themselves are alive and reachable from FX > Master.
+    if (!masterStripPoppedOut)
+    {
+        masterFaderLabel.setVisible(false);
+        masterFader.setVisible(false);
+        masterPeakMeter.setVisible(false);
+        masterDbLabel.setVisible(false);
+        masterLufsPeakLabel.setVisible(false);
+        limiterButton.setVisible(false);
+        limiterThresholdSlider.setVisible(false);
+        limiterReleaseLabel.setVisible(false);
+        limiterReleaseSlider.setVisible(false);
+        reverbRoomLabel.setVisible(false);
+        reverbRoomSlider.setVisible(false);
+        delayTimeLabel.setVisible(false);
+        delayTimeSlider.setVisible(false);
+        delayDivisionSelector.setVisible(false);
+        delayPingPongButton.setVisible(false);
+    }
+    masterChannelPulseBounds = {};
+
+    // Split the remaining area into local strip + mixer
+    int maxLocalWidth = usersPoppedOut ? area.getWidth() : area.getWidth() - 200;
+    if (maxLocalWidth < 120) maxLocalWidth = 120;
     if (localWidth > maxLocalWidth)
         localWidth = maxLocalWidth;
 
     auto localArea = area.removeFromLeft(localWidth);
-    auto masterArea = area.removeFromRight(masterWidth);
-    auto masterPulseBounds = masterArea;
     auto userArea = area;
 
     if (!usersPoppedOut)
@@ -9762,97 +9956,79 @@ void NinjamVst3AudioProcessorEditor::resized()
     else
         userList.setBounds(juce::Rectangle<int>()); // hide while popped out
 
-    // Combined header row: "You" label on the left, "Chord:" after it,
-    // then +/- buttons and voice toggle at fixed positions so they don't move
-    // when local channels are added. The local area grows to fit channels,
-    // but these controls stay anchored.
+    // Local header: "You" + chord on the left, -/+ and AT anchored right.
     auto localHeader = localArea.removeFromTop(22);
-    // "Local" and "Chord" labels anchored to the left
-    localFaderLabel.setVisible(true);
-    localChordLabel.setVisible(true);
-    localFaderLabel.setBounds(localHeader.removeFromLeft(32));
-    localChordLabel.setBounds(localHeader.removeFromLeft(64));
-    // Voice toggle on the far right (when no separate voice channel)
-    juce::Rectangle<int> voiceToggleArea;
-    if (!showSeparateVoiceChannel)
-        voiceToggleArea = localHeader.removeFromRight(44);
-    // -/+ buttons anchored to the RIGHT edge, just left of voice toggle
-    auto addButtonArea = localHeader.removeFromRight(24);
-    auto removeButtonArea = localHeader.removeFromRight(24);
-    // Auto-tune button to the left of -/+ buttons.
-    // When only 1 local channel is available (e.g. server has limited channels),
-    // the local area is too narrow for the AT button in the header. In that case
-    // we leave autoTuneArea empty here and position it next to the channel name
-    // below, in line with the voice button.
+    localFaderLabel.setVisible(!hideChrome);
+    localChordLabel.setVisible(!hideChrome);
+    addLocalChannelButton.setVisible(!hideChrome);
+    removeLocalChannelButton.setVisible(!hideChrome);
+    autoTuneButton.setVisible(!hideChrome);
+
     juce::Rectangle<int> autoTuneArea;
     const bool singleLocalChannel = (numLocal == 1);
-    if (!singleLocalChannel)
+
+    if (hideChrome)
     {
-        localHeader.removeFromRight(2);
-        autoTuneArea = localHeader.removeFromRight(28);
+        localFaderLabel.setBounds({});
+        localChordLabel.setBounds({});
+        localChordStatsLabel.setVisible(false);
+        localChordStatsLabel.setBounds({});
+        addLocalChannelButton.setBounds({});
+        removeLocalChannelButton.setBounds({});
+        autoTuneButton.setBounds({});
+        // Give the reclaimed header height back to the faders
+        localArea = localArea.withTop(localHeader.getY());
     }
-    removeLocalChannelButton.setBounds(removeButtonArea);
-    addLocalChannelButton.setBounds(addButtonArea);
-    autoTuneButton.setBounds(autoTuneArea);
-    if (!showSeparateVoiceChannel)
-        voiceChatButton.setBounds(voiceToggleArea.reduced(1, 0));
-    // Chord stats fills any remaining space between chord label and -/+ buttons
-    const bool showChordStats = localHeader.getWidth() >= 90;
-    localChordStatsLabel.setVisible(showChordStats);
-    localChordStatsLabel.setBounds(showChordStats ? localHeader : juce::Rectangle<int>());
+    else
+    {
+        localFaderLabel.setBounds(localHeader.removeFromLeft(32));
+        localChordLabel.setBounds(localHeader.removeFromLeft(64));
+        auto addButtonArea = localHeader.removeFromRight(24);
+        auto removeButtonArea = localHeader.removeFromRight(24);
+        if (!singleLocalChannel)
+        {
+            localHeader.removeFromRight(2);
+            autoTuneArea = localHeader.removeFromRight(28);
+        }
+        removeLocalChannelButton.setBounds(removeButtonArea);
+        addLocalChannelButton.setBounds(addButtonArea);
+        autoTuneButton.setBounds(autoTuneArea);
+        const bool showChordStats = localHeader.getWidth() >= 90;
+        localChordStatsLabel.setVisible(showChordStats);
+        localChordStatsLabel.setBounds(showChordStats ? localHeader : juce::Rectangle<int>());
+    }
+
     auto localInner = localArea.reduced(4);
 
     int meterWidth = 18;
     int totalWidth = localInner.getWidth();
-    int totalColumns = numLocal + (showSeparateVoiceChannel ? 1 : 0);
-    int columnWidth = totalWidth / juce::jmax(1, totalColumns);
-
-    voiceChannelNameLabel.setVisible(showSeparateVoiceChannel);
-    voiceChatButton.setVisible(true);
-    voiceFader.setVisible(showSeparateVoiceChannel);
-    voicePeakMeter.setVisible(showSeparateVoiceChannel);
-    voiceInputSelector.setVisible(showSeparateVoiceChannel);
-    voiceDbLabel.setVisible(showSeparateVoiceChannel);
+    int columnWidth = totalWidth / juce::jmax(1, numLocal);
 
     for (int i = 0; i < NinjamVst3AudioProcessor::maxLocalChannels; ++i)
     {
         bool visible = i < numLocal;
         localFaders[(size_t)i].setVisible(visible);
         localPeakMeters[(size_t)i].setVisible(visible);
-        localInputSelectors[(size_t)i].setVisible(visible);
-        localInputModeSelectors[(size_t)i].setVisible(visible);
+        // The channel input picker (In 1/In 2/"1/2" stereo pairs), the
+        // mono/stereo input mode selector, and the reverb/delay send knobs
+        // are permanently off-screen now — they still work at whatever value
+        // they already hold, they are just not shown.
+        localInputSelectors[(size_t)i].setVisible(false);
+        localInputSelectors[(size_t)i].setBounds({});
+        localInputModeSelectors[(size_t)i].setVisible(false);
+        localInputModeSelectors[(size_t)i].setBounds({});
         localDbLabels[(size_t)i].setVisible(visible);
         localChannelNameLabels[(size_t)i].setVisible(visible);
-        localReverbSendKnobs[(size_t)i].setVisible(visible);
-        localDelaySendKnobs[(size_t)i].setVisible(visible);
-        localReverbSendLabels[(size_t)i].setVisible(visible);
-        localDelaySendLabels[(size_t)i].setVisible(visible);
+        localReverbSendKnobs[(size_t)i].setVisible(false);
+        localDelaySendKnobs[(size_t)i].setVisible(false);
+        localReverbSendLabels[(size_t)i].setVisible(false);
+        localDelaySendLabels[(size_t)i].setVisible(false);
+        localReverbSendKnobs[(size_t)i].setBounds({});
+        localDelaySendKnobs[(size_t)i].setBounds({});
+        localReverbSendLabels[(size_t)i].setBounds({});
+        localDelaySendLabels[(size_t)i].setBounds({});
         if (!visible)
             localChannelPulseBounds[(size_t)i] = {};
-    }
-
-    if (showSeparateVoiceChannel)
-    {
-        juce::Rectangle<int> col = localInner.removeFromLeft(columnWidth);
-        const auto pulseBounds = col;
-        auto meterArea = col.removeFromLeft(meterWidth);
-        auto nameArea = col.removeFromTop(18);
-        auto buttonArea = col.removeFromTop(22);
-        col.removeFromTop(2);
-        auto dbArea = col.removeFromBottom(16);
-        auto inputArea = col.removeFromBottom(20);
-
-        voiceChannelNameLabel.setBounds(nameArea);
-        voiceChatButton.setBounds(buttonArea.reduced(1, 0));
-        voiceFader.setBounds(col);
-        voicePeakMeter.setBounds(meterArea);
-        voiceInputSelector.setBounds(inputArea);
-        voiceDbLabel.setBounds(dbArea);
-        voiceChannelPulseBounds = pulseBounds.expanded(1);
-    }
-    else
-    {
-        voiceChannelPulseBounds = {};
     }
 
     for (int i = 0; i < numLocal; ++i)
@@ -9862,21 +10038,14 @@ void NinjamVst3AudioProcessorEditor::resized()
         auto meterArea = col.removeFromLeft(meterWidth);
         auto nameArea = col.removeFromTop(18);
         auto dbArea = col.removeFromBottom(16);
-        auto inputArea = col.removeFromBottom(20);
-        auto inputModeArea = col.removeFromBottom(20);
-        auto sendArea = col.removeFromBottom(34);
-        sendArea = sendArea.reduced(6, 0); // inset sides so knobs are closer together
-        auto revArea = sendArea.removeFromLeft(sendArea.getWidth() / 2);
-        auto dlyArea = sendArea;
-        auto revLabelArea = revArea.removeFromTop(7);
-        auto dlyLabelArea = dlyArea.removeFromTop(7);
+        // The input picker, input mode selector, and the reverb/delay send
+        // knobs no longer take any vertical space here — that space goes
+        // straight to the fader instead.
         localFaders[(size_t)i].setBounds(col);
         localPeakMeters[(size_t)i].setBounds(meterArea);
-        localInputSelectors[(size_t)i].setBounds(inputArea);
-        localInputModeSelectors[(size_t)i].setBounds(inputModeArea);
         localDbLabels[(size_t)i].setBounds(dbArea);
-        // When single channel, reserve space on the right of the name for the AT button
-        if (singleLocalChannel && i == 0)
+        // When single channel and the header is showing, reserve room for AT
+        if (singleLocalChannel && i == 0 && !hideChrome)
         {
             auto atArea = nameArea.removeFromRight(28);
             localChannelNameLabels[(size_t)i].setBounds(nameArea);
@@ -9886,66 +10055,8 @@ void NinjamVst3AudioProcessorEditor::resized()
         {
             localChannelNameLabels[(size_t)i].setBounds(nameArea);
         }
-        localReverbSendLabels[(size_t)i].setBounds(revLabelArea);
-        localDelaySendLabels[(size_t)i].setBounds(dlyLabelArea);
         localChannelPulseBounds[(size_t)i] = pulseBounds.expanded(1);
-
-        auto revKnobArea = revArea.expanded(1);
-        auto dlyKnobArea = dlyArea.expanded(1);
-
-        int revKnobSize = juce::jmin(24, juce::jmin(revKnobArea.getWidth(), revKnobArea.getHeight()));
-        int dlyKnobSize = juce::jmin(24, juce::jmin(dlyKnobArea.getWidth(), dlyKnobArea.getHeight()));
-
-        juce::Rectangle<int> revKnobRect(0, 0, revKnobSize, revKnobSize);
-        juce::Rectangle<int> dlyKnobRect(0, 0, dlyKnobSize, dlyKnobSize);
-        revKnobRect = revKnobRect.withCentre(revKnobArea.getCentre().translated(0, -2));
-        dlyKnobRect = dlyKnobRect.withCentre(dlyKnobArea.getCentre().translated(0, -2));
-
-        localReverbSendKnobs[(size_t)i].setBounds(revKnobRect);
-        localDelaySendKnobs[(size_t)i].setBounds(dlyKnobRect);
     }
-
-    masterFaderLabel.setBounds(masterArea.removeFromTop(20));
-    auto masterInner = masterArea.reduced(4);
-    auto masterMeterWidth = 18;
-    auto masterMeterArea = masterInner.removeFromRight(masterMeterWidth);
-    auto controlColumn = masterInner.removeFromLeft(70);
-    auto fxColumn = masterInner;
-
-    limiterButton.setBounds(controlColumn.removeFromTop(20));
-
-    int bottomHeight = 70;
-    if (bottomHeight > controlColumn.getHeight())
-        bottomHeight = controlColumn.getHeight();
-
-    auto threshArea = controlColumn.removeFromTop(controlColumn.getHeight() - bottomHeight);
-    limiterThresholdSlider.setBounds(threshArea);
-
-    auto releaseBlock = controlColumn;
-    limiterReleaseLabel.setBounds(releaseBlock.removeFromTop(18));
-
-    auto knobArea = releaseBlock.reduced(6, 0);
-    int knobSize = juce::jmin(knobArea.getWidth(), knobArea.getHeight());
-    juce::Rectangle<int> knobRect(0, 0, knobSize, knobSize);
-    knobRect = knobRect.withCentre(knobArea.getCentre());
-    limiterReleaseSlider.setBounds(knobRect);
-
-    auto delayBlock = fxColumn.removeFromTop(70);
-    delayTimeLabel.setBounds(delayBlock.removeFromTop(16));
-    auto delayKnobBounds = delayBlock.reduced(4);
-    int delayKnobSize = juce::jmin(delayKnobBounds.getWidth(), delayKnobBounds.getHeight());
-    delayTimeSlider.setBounds(juce::Rectangle<int>(delayKnobSize, delayKnobSize).withCentre(delayKnobBounds.getCentre()));
-
-    fxColumn.removeFromTop(2);
-    delayDivisionSelector.setBounds(fxColumn.removeFromTop(22));
-    fxColumn.removeFromTop(2);
-    delayPingPongButton.setBounds(fxColumn.removeFromTop(22));
-
-    masterFader.setBounds(masterInner.removeFromTop(masterInner.getHeight() - 32));
-    masterDbLabel.setBounds(masterInner.removeFromTop(16));
-    masterLufsPeakLabel.setBounds(masterInner);
-    masterPeakMeter.setBounds(masterMeterArea);
-    masterChannelPulseBounds = masterPulseBounds.expanded(1);
 
     if (showDockedChat)
     {
@@ -10012,6 +10123,11 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
     if (audioProcessor.getClient().GetStatus() == NJClient::NJC_STATUS_OK)
         currentServerMaxLocalChannels = juce::jmax(1, audioProcessor.getClient().GetMaxLocalChannels());
     maxChannelsLabel.setText("Max Ch: " + juce::String(currentServerMaxLocalChannels), juce::dontSendNotification);
+
+    // Keep the popped-out mixer window's height matched to the number of
+    // connected users as they join/leave (throttled internally to only act
+    // when the count actually changes).
+    autoFitRemoteUsersWindow(false);
 
     // Session recording status
     {
@@ -10647,7 +10763,10 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
             backgroundImage = std::move(frame);
             lastVideoBackgroundRepaintMs = nowMs;
             backgroundComponent.setBackgroundImage(backgroundImage);
-            userList.setBackgroundImage(backgroundImage);
+            // Only let the animated background bleed into the mixer when the mixer
+            // is set to follow the main GUI skin.
+            if (!mixerBackgroundImage.isValid())
+                userList.setBackgroundImage(backgroundImage);
         }
     }
 #endif
@@ -10677,8 +10796,10 @@ void NinjamVst3AudioProcessorEditor::timerCallback()
 
     juce::String text;
     text << "NJ " << juce::String(njBpm, 1) << " / " << bpi << " BPI";
-    if (hostBpm > 0.0)
-        text << " | Host " << juce::String(hostBpm, 1) << (hostPlaying ? " (Play)" : " (Stop)");
+    // The "Host <bpm>" segment is intentionally never shown any more — it's
+    // still computed above because the host-sync mismatch warning elsewhere
+    // still needs it, just not printed here.
+    juce::ignoreUnused(hostPlaying);
 
     int codecMode = audioProcessor.getCodecMode();
     juce::String codec;
@@ -11353,6 +11474,7 @@ void NinjamVst3AudioProcessorEditor::savePersistentSettingsToDisk(bool includePr
     props.setValue("password", passField.getText());
     props.setValue("anonymous", anonymousButton.getToggleState());
     props.setValue("layoutVertical", layoutButton.getToggleState());
+    props.setValue("hideChrome", chromeHidden);
     props.setValue("chatVisible", chatButton.getToggleState());
     props.setValue("videoBgEnabled", videoBgToggle.getToggleState());
     props.setValue("autoLevelEnabled", autoLevelButton.getToggleState());
@@ -11478,9 +11600,21 @@ void NinjamVst3AudioProcessorEditor::loadPersistentSettingsFromDisk()
     anonymousButton.setToggleState(props.getBoolValue("anonymous", anonymousButton.getToggleState()), juce::dontSendNotification);
     anonymousToggled();
 
-    layoutButton.setToggleState(props.getBoolValue("layoutVertical", layoutButton.getToggleState()), juce::dontSendNotification);
+    // The layout toggle button is permanently hidden from the GUI now — the
+    // mixer is locked to the classic vertical-fader mixer layout (True =
+    // Horizontal Mixer per setLayoutMode's naming, but each individual strip
+    // is vertical — side-by-side vertical channel faders), regardless of
+    // anything saved from a previous session.
+    layoutButton.setToggleState(true, juce::dontSendNotification);
     layoutToggled();
     updateLayoutButtonColor();
+
+    const bool savedHideChrome = props.getBoolValue("hideChrome", false);
+    if (savedHideChrome != chromeHidden)
+    {
+        hideChromeButton.setToggleState(savedHideChrome, juce::dontSendNotification);
+        hideChromeToggled();
+    }
 
     const bool chatVisible = props.getBoolValue("chatVisible", chatButton.getToggleState());
     chatButton.setToggleState(chatVisible, juce::dontSendNotification);
@@ -11853,9 +11987,14 @@ void NinjamVst3AudioProcessorEditor::openChatPopoutWindow(const juce::StringArra
 
                                             safeThis->chatWindow.reset();
                                             safeThis->chatPoppedOut = false;
-                                            safeThis->chatButton.setToggleState(false, juce::dontSendNotification);
+                                            // Bug fix: closing via the window's own close button
+                                            // used to force chatButton off too, which hid chat
+                                            // completely instead of re-docking it. Docking back
+                                            // in means chat stays "on", just no longer popped out.
+                                            safeThis->chatButton.setToggleState(true, juce::dontSendNotification);
                                             safeThis->updateChatButtonColor();
-                                            // Bypass deferred-resize optimization so chat hides on close
+                                            // Bypass deferred-resize optimization so the docked
+                                            // chat panel reappears immediately on close.
                                             const bool wasDeferred = safeThis->applyingDeferredResizeLayout;
                                             safeThis->applyingDeferredResizeLayout = true;
                                             safeThis->resized();
@@ -11980,8 +12119,8 @@ void NinjamVst3AudioProcessorEditor::usersPopoutClicked()
                                           safeThis->setAbletonRemoteUsersWindowSizePreset(preset);
                                   });
 
-    // Apply the same background texture as the main editor
-    userList.setBackgroundImage(backgroundImage);
+    // Apply the mixer background (falls back to the main editor texture)
+    userList.setBackgroundImage(mixerBackgroundImage.isValid() ? mixerBackgroundImage : backgroundImage);
     userList.setPoppedOut(true);
 
     remoteUsersWindow.reset(new RemoteUsersWindow(
@@ -12011,6 +12150,85 @@ void NinjamVst3AudioProcessorEditor::usersPopoutClicked()
 
     // userList is now displayed inside the popout window; trigger layout
     resized();
+
+    // Give the freshly-opened popout an initial size that matches how many
+    // people are actually connected, instead of always opening at a fixed
+    // size that wastes space for a small session (or clips a big one).
+    lastMixerPopoutUserCount = -1;
+    autoFitRemoteUsersWindow(true);
+}
+
+void NinjamVst3AudioProcessorEditor::autoFitRemoteUsersWindow(bool force)
+{
+    if (!usersPoppedOut || !remoteUsersWindow)
+        return;
+
+    auto* win = dynamic_cast<RemoteUsersWindow*>(remoteUsersWindow.get());
+    if (win == nullptr || win->isAbletonHosted())
+        return; // Ableton-hosted popouts keep their fixed preset size on purpose
+
+    const int numUsers = (int) audioProcessor.getConnectedUsers().size();
+    if (!force && numUsers == lastMixerPopoutUserCount)
+        return;
+    lastMixerPopoutUserCount = numUsers;
+
+    // Mixer is locked to the classic vertical-fader layout: strips sit side
+    // by side (each ~80px wide) rather than stacked in rows, so the width
+    // that avoids wasting space is what scales with the user count — not
+    // the height, which just needs to be tall enough for one strip.
+    const int stripWidth = 80;
+    const int chromeAllowance = 30; // window borders + a little breathing room
+    const int desiredWidth = juce::jlimit(260, 2200,
+        chromeAllowance + juce::jmax(1, numUsers) * stripWidth + 20);
+
+    auto b = win->getBounds();
+    if (std::abs(b.getWidth() - desiredWidth) > 4)
+        win->setBounds(b.getX(), b.getY(), desiredWidth, b.getHeight());
+}
+
+void NinjamVst3AudioProcessorEditor::intervalPopoutClicked()
+{
+    if (intervalPoppedOut)
+    {
+        // Already popped out — close the popout and dock the display back in.
+        if (intervalPopoutWindow)
+            intervalPopoutWindow.reset();
+        intervalPoppedOut = false;
+        intervalPopoutButton.setButtonText("Popout");
+        addAndMakeVisible(intervalDisplay);
+        const bool wasDeferred = applyingDeferredResizeLayout;
+        applyingDeferredResizeLayout = true;
+        resized();
+        applyingDeferredResizeLayout = wasDeferred;
+        return;
+    }
+
+    intervalPoppedOut = true;
+    intervalPopoutButton.setButtonText("Pop-in");
+
+    juce::Component::SafePointer<NinjamVst3AudioProcessorEditor> safeThis(this);
+    intervalPopoutWindow.reset(new IntervalPopoutWindow(intervalDisplay,
+        [safeThis]()
+        {
+            if (safeThis == nullptr)
+                return;
+
+            // Window closed — move the interval display back into the editor.
+            safeThis->intervalPopoutWindow.reset();
+            safeThis->intervalPoppedOut = false;
+            safeThis->intervalPopoutButton.setButtonText("Popout");
+            safeThis->addAndMakeVisible(safeThis->intervalDisplay);
+            const bool wasDeferred = safeThis->applyingDeferredResizeLayout;
+            safeThis->applyingDeferredResizeLayout = true;
+            safeThis->resized();
+            safeThis->applyingDeferredResizeLayout = wasDeferred;
+        }));
+
+    // intervalDisplay is now displayed inside the popout window; trigger layout
+    const bool wasDeferred = applyingDeferredResizeLayout;
+    applyingDeferredResizeLayout = true;
+    resized();
+    applyingDeferredResizeLayout = wasDeferred;
 }
 
 void NinjamVst3AudioProcessorEditor::updateSamplePadsFeatureVisibility()
@@ -12928,8 +13146,208 @@ void NinjamVst3AudioProcessorEditor::loadControlImages(const juce::File& themeDi
 
     applyThemeColours();
     updateEditorTimerInterval();
+    // A dedicated mixer skin must survive a main-skin change.
+    applyMixerBackground();
     backgroundComponent.repaint();
     repaint();
+}
+
+void NinjamVst3AudioProcessorEditor::applyMixerBackground()
+{
+    const int idx = mixerBackgroundSelector.getSelectedItemIndex() - 1;
+    if (idx >= 0 && idx < textureFiles.size())
+    {
+        auto bgFiles = textureFiles[idx].findChildFiles(juce::File::findFiles, false, "bg.*");
+        if (!bgFiles.isEmpty())
+        {
+            mixerBackgroundImage = juce::ImageFileFormat::loadFrom(bgFiles[0]);
+            if (mixerBackgroundImage.isValid())
+            {
+                userList.setBackgroundImage(mixerBackgroundImage);
+                return;
+            }
+        }
+    }
+
+    // "as GUI" (or a skin with no usable bg.*): follow the main background.
+    mixerBackgroundImage = juce::Image();
+    userList.setBackgroundImage(backgroundImage);
+}
+
+void NinjamVst3AudioProcessorEditor::setChromeComponentsVisible(bool v)
+{
+    // Everything that appears in the top three rows of the window.
+    // NOTE: anonymousButton, videoBgToggle, layoutButton and autoLevelButton
+    // are deliberately absent — they are permanently hidden by the redesign
+    // (forced invisible unconditionally at the top of resized()), and must
+    // not be re-shown here when the chrome comes back.
+    juce::Component* const chrome[] = {
+        &serverLabel, &serverField, &serverListButton,
+        &userLabel, &userField,
+        &connectButton, &statusLabel, &onlineClockLabel,
+        &recordButton, &recordFolderButton,
+        &backgroundSelector, &mixerBackgroundSelector,
+        &metronomeLabel, &metronomeSlider,
+        &metronomeMuteButton, &syncButton, &fxButton, &optionsButton,
+        &aboutButton, &tempoLabel, &chatButton, &videoButton,
+        &transmitButton, &localMonitorButton, &bitrateSelector,
+        &midiRelayTargetSelector, &spreadOutputsButton, &usersPopoutButton,
+        &maxChannelsLabel
+    };
+
+    for (auto* comp : chrome)
+        comp->setVisible(v);
+
+    if (!v)
+    {
+        for (auto* comp : chrome)
+            comp->setBounds({});
+    }
+
+    // These two have their own rules — restore them from their real source of
+    // truth rather than forcing them visible.
+    if (v)
+    {
+        const bool showPassword = !anonymousButton.getToggleState();
+        passLabel.setVisible(showPassword);
+        passField.setVisible(showPassword);
+        samplePadsButton.setVisible(audioProcessor.isSamplePadsFeatureEnabled());
+    }
+    else
+    {
+        passLabel.setVisible(false);
+        passField.setVisible(false);
+        passLabel.setBounds({});
+        passField.setBounds({});
+        samplePadsButton.setVisible(false);
+        samplePadsButton.setBounds({});
+    }
+}
+
+void NinjamVst3AudioProcessorEditor::hideChromeToggled()
+{
+    chromeHidden = hideChromeButton.getToggleState();
+    hideChromeButton.setButtonText(chromeHidden ? "Show the crap" : "Hide the crap");
+    hideChromeButton.setTooltip(chromeHidden ? "Bring the controls back"
+                                             : "Hide everything except the mixer");
+
+    // The limiter must always be off while decluttered. Remember whatever it
+    // was set to so it comes back exactly as the user left it when they show
+    // the GUI again.
+    if (chromeHidden)
+    {
+        limiterEnabledBeforeHide = audioProcessor.isMasterLimiterEnabled();
+        audioProcessor.setMasterLimiterEnabled(false);
+    }
+    else
+    {
+        audioProcessor.setMasterLimiterEnabled(limiterEnabledBeforeHide);
+    }
+    limiterButton.setToggleState(audioProcessor.isMasterLimiterEnabled(), juce::dontSendNotification);
+    updateLimiterButtonColor();
+
+    // Ableton's resize fast path skips layout when the window size is unchanged,
+    // which is exactly our situation here. Force one full pass through.
+    forceFullRelayout = true;
+    resized();
+    forceFullRelayout = false;
+
+    repaint();
+    markPersistentSettingsDirty();
+}
+
+void NinjamVst3AudioProcessorEditor::reclaimMasterStripComponents()
+{
+    juce::Component* const masterBits[] = {
+        &masterFaderLabel, &masterFader, &masterPeakMeter, &masterDbLabel,
+        &masterLufsPeakLabel, &limiterButton, &limiterThresholdSlider,
+        &limiterReleaseLabel, &limiterReleaseSlider
+    };
+
+    for (auto* comp : masterBits)
+    {
+        addChildComponent(comp);
+        comp->setVisible(false);
+        comp->setBounds({});
+    }
+
+    masterStripPoppedOut = false;
+    masterChannelPulseBounds = {};
+}
+
+void NinjamVst3AudioProcessorEditor::showMasterStripPopup()
+{
+    if (masterStripPoppedOut)
+        return;
+
+    // A local class here keeps the editor's private members accessible without
+    // widening the class interface.
+    class MasterStripPopup : public juce::Component
+    {
+    public:
+        explicit MasterStripPopup(NinjamVst3AudioProcessorEditor& ownerIn) : owner(&ownerIn)
+        {
+            addAndMakeVisible(ownerIn.masterFaderLabel);
+            addAndMakeVisible(ownerIn.masterFader);
+            addAndMakeVisible(ownerIn.masterPeakMeter);
+            addAndMakeVisible(ownerIn.masterDbLabel);
+            addAndMakeVisible(ownerIn.masterLufsPeakLabel);
+            addAndMakeVisible(ownerIn.limiterButton);
+            addAndMakeVisible(ownerIn.limiterThresholdSlider);
+            addAndMakeVisible(ownerIn.limiterReleaseLabel);
+            addAndMakeVisible(ownerIn.limiterReleaseSlider);
+            setSize(210, 300);
+        }
+
+        ~MasterStripPopup() override
+        {
+            // The callout lives on the desktop and can outlive the editor (for
+            // example if the DAW closes the plug-in window while it is open), so
+            // the owner is held through a SafePointer and checked here.
+            if (auto* ed = owner.getComponent())
+            {
+                ed->reclaimMasterStripComponents();
+                ed->resized();
+            }
+        }
+
+        void resized() override
+        {
+            auto* ed = owner.getComponent();
+            if (ed == nullptr)
+                return;
+
+            auto b = getLocalBounds().reduced(6);
+            ed->masterFaderLabel.setBounds(b.removeFromTop(20));
+            auto meter = b.removeFromRight(18);
+            ed->masterPeakMeter.setBounds(meter);
+            b.removeFromRight(4);
+
+            auto controlColumn = b.removeFromLeft(70);
+            ed->limiterButton.setBounds(controlColumn.removeFromTop(20));
+            int bottomHeight = juce::jmin(70, controlColumn.getHeight());
+            ed->limiterThresholdSlider.setBounds(
+                controlColumn.removeFromTop(controlColumn.getHeight() - bottomHeight));
+            auto releaseBlock = controlColumn;
+            ed->limiterReleaseLabel.setBounds(releaseBlock.removeFromTop(18));
+            auto knobArea = releaseBlock.reduced(6, 0);
+            int knobSize = juce::jmin(knobArea.getWidth(), knobArea.getHeight());
+            ed->limiterReleaseSlider.setBounds(
+                juce::Rectangle<int>(0, 0, knobSize, knobSize).withCentre(knobArea.getCentre()));
+
+            b.removeFromLeft(6);
+            ed->masterFader.setBounds(b.removeFromTop(juce::jmax(40, b.getHeight() - 32)));
+            ed->masterDbLabel.setBounds(b.removeFromTop(16));
+            ed->masterLufsPeakLabel.setBounds(b);
+        }
+
+    private:
+        juce::Component::SafePointer<NinjamVst3AudioProcessorEditor> owner;
+    };
+
+    masterStripPoppedOut = true;
+    auto popup = std::make_unique<MasterStripPopup>(*this);
+    showSettingsCallout(std::move(popup), fxButton);
 }
 
 void NinjamVst3AudioProcessorEditor::applyThemeColours()
@@ -13382,6 +13800,11 @@ void NinjamVst3AudioProcessorEditor::showFxMenu()
     juce::PopupMenu menu;
     menu.addItem(2, "Reverb");
     menu.addItem(3, "Delay");
+    menu.addSeparator();
+    // The master/limiter strip and the voice channel no longer live in the main
+    // window, so they are reachable from here instead.
+    menu.addItem(4, "Master / Limiter...");
+    menu.addItem(5, "Voice Chat", true, voiceChatButton.getToggleState());
     menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&fxButton),
         [this](int result)
         {
@@ -13390,6 +13813,17 @@ void NinjamVst3AudioProcessorEditor::showFxMenu()
 
             audioProcessor.setFxReverbEnabled(true);
             audioProcessor.setFxDelayEnabled(true);
+            if (result == 4)
+            {
+                showMasterStripPopup();
+                return;
+            }
+            if (result == 5)
+            {
+                voiceChatButton.setToggleState(!voiceChatButton.getToggleState(),
+                                               juce::sendNotificationSync);
+                return;
+            }
             if (result == 2)
                 showReverbSettingsPopup();
             if (result == 3)

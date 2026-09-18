@@ -19517,6 +19517,11 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
 
     if (localChannelBuffer.getNumChannels() < maxLocalChannels || localChannelBuffer.getNumSamples() < numSamples)
         localChannelBuffer.setSize(maxLocalChannels, numSamples, false, false, true);
+    if (localChannelRecordL.getNumChannels() < maxLocalChannels || localChannelRecordL.getNumSamples() < numSamples)
+    {
+        localChannelRecordL.setSize(maxLocalChannels, numSamples, false, false, true);
+        localChannelRecordR.setSize(maxLocalChannels, numSamples, false, false, true);
+    }
     if (voiceChannelBuffer.getNumChannels() < 1 || voiceChannelBuffer.getNumSamples() < numSamples)
         voiceChannelBuffer.setSize(1, numSamples, false, false, true);
 
@@ -19670,12 +19675,29 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
             monitorStereo[(size_t)ch] = (right != left);
         }
 
+        // Stereo capture for session recording: the raw left/right pair
+        // before the mono downmix above. A genuinely mono source gets the
+        // same signal duplicated into both L and R, matching remote users'
+        // tracks being stereo too.
+        localChannelRecordL.clear(ch, 0, numSamples);
+        localChannelRecordR.clear(ch, 0, numSamples);
+        if (leftSource >= 0 && leftSource < totalAvailableInputChannels)
+            localChannelRecordL.copyFrom(ch, 0, tempInputBuffer, leftSource, 0, numSamples);
+        if (rightSource >= 0 && rightSource < totalAvailableInputChannels)
+            localChannelRecordR.copyFrom(ch, 0, tempInputBuffer, rightSource, 0, numSamples);
+        else if (leftSource >= 0 && leftSource < totalAvailableInputChannels)
+            localChannelRecordR.copyFrom(ch, 0, tempInputBuffer, leftSource, 0, numSamples);
+
         monitorSourceLeft[(size_t)ch] = leftSource;
         monitorSourceRight[(size_t)ch] = rightSource;
 
         float gain = localChannelGains[(size_t)ch].load();
         if (gain != 1.0f)
+        {
             localChannelBuffer.applyGain(ch, 0, numSamples, gain);
+            localChannelRecordL.applyGain(ch, 0, numSamples, gain);
+            localChannelRecordR.applyGain(ch, 0, numSamples, gain);
+        }
 
         // Auto-tune on local channel 1 (ch == 0) — mono processing
         if (ch == 0 && autoTuneProcessor != nullptr && autoTuneEnabled.load(std::memory_order_relaxed))
@@ -19875,11 +19897,13 @@ void NinjamVst3AudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, j
     localPeakL.store(globalLocalMaxL);
     localPeakR.store(globalLocalMaxR);
 
-    // Session recorder: tap local channels (post-gain, post-AutoTune)
+    // Session recorder: tap local channels in stereo (post-gain). Uses the
+    // raw stereo capture, not the mono downmix used for monitoring/NINJAM
+    // transmission — see localChannelRecordL/R above.
     if (sessionRecorder.isRecording())
     {
         for (int ch = 0; ch < actualLocal; ++ch)
-            sessionRecorder.writeLocalChannel(ch, localChannelBuffer.getReadPointer(ch), numSamples);
+            sessionRecorder.writeLocalChannel(ch, localChannelRecordL.getReadPointer(ch), localChannelRecordR.getReadPointer(ch), numSamples);
     }
 
     if (chordAnalyzer && !fedChordAnalyzer)

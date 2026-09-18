@@ -95,15 +95,17 @@ void SessionRecorder::writerThreadFunc()
             tracks.push_back(std::move(t));
         }
 
-        // Local channel tracks (ids 1..8)
+        // Local channel tracks (ids 1..8) — stereo, matching remote user
+        // tracks. A mono source is duplicated to L/R upstream in
+        // PluginProcessor before it reaches here.
         for (int i = 0; i < pendingNumLocalCh && i < maxLocalChannels; ++i)
         {
             auto t = std::make_unique<Track>();
             t->trackId = i + 1;
-            t->numChannels = 1;
+            t->numChannels = 2;
             t->name = "Local_" + juce::String(i + 1);
             t->ringCapacity = static_cast<int>(sr * ringSeconds);
-            t->ringBuffer.resize((size_t)t->ringCapacity, 0.0f);
+            t->ringBuffer.resize((size_t)t->ringCapacity * 2, 0.0f);
             t->writePos = 0;
             t->readPos = 0;
             tracks.push_back(std::move(t));
@@ -326,7 +328,7 @@ void SessionRecorder::writeMasterBlock(const float* left, const float* right, in
     }
 }
 
-void SessionRecorder::writeLocalChannel(int channel, const float* data, int numSamples)
+void SessionRecorder::writeLocalChannel(int channel, const float* left, const float* right, int numSamples)
 {
     if (!recording.load(std::memory_order_acquire))
         return;
@@ -335,7 +337,20 @@ void SessionRecorder::writeLocalChannel(int channel, const float* data, int numS
     Track* t = findTrack(channel + 1);
     if (t == nullptr)
         return;
-    pushSamples(*t, data, numSamples);
+
+    float inter[512];
+    int processed = 0;
+    while (processed < numSamples)
+    {
+        int chunk = juce::jmin(256, numSamples - processed);
+        for (int i = 0; i < chunk; ++i)
+        {
+            inter[i * 2] = left[processed + i];
+            inter[i * 2 + 1] = right[processed + i];
+        }
+        pushSamples(*t, inter, chunk);
+        processed += chunk;
+    }
 }
 
 void SessionRecorder::writeRemoteUser(int userIndex, const float* left, const float* right, int numSamples)

@@ -831,6 +831,15 @@ private:
 
     juce::AudioBuffer<float> tempInputBuffer;
     juce::AudioBuffer<float> localChannelBuffer;
+    // Raw stereo capture of each local channel's input, taken before the
+    // mono downmix that localChannelBuffer above uses for monitoring/NINJAM
+    // transmission. Used only for session recording, so local channel WAV
+    // files are stereo (matching remote user tracks) instead of mono; a
+    // genuinely mono source is simply duplicated to L and R. Gain-matched
+    // to what's actually heard, but does NOT include ch0-only effects
+    // (auto-tune, sample-pad injection) which stay mono-only.
+    juce::AudioBuffer<float> localChannelRecordL;
+    juce::AudioBuffer<float> localChannelRecordR;
     juce::AudioBuffer<float> localMixBuffer;   // 1-ch mix used by multiChanAuto Vorbis slot
     juce::AudioBuffer<float> voiceChannelBuffer;
     juce::AudioBuffer<float> masterChordScratchBuffer;
