@@ -1957,7 +1957,13 @@
 
         function buildObsViewerUrl(streamId, userKey, target) {
             const params = new URLSearchParams();
+            // Room-scoped viewer: without `room`, a bare `view=<streamId>` link
+            // cannot discover a camera published inside a NINJAM room, so the
+            // tile stays black. `solo=1` keeps the tile showing only this one
+            // stream instead of falling back to the room's full scene.
+            params.set('room', appState.room);
             params.set('view', String(streamId || '').trim());
+            params.set('solo', '1');
             params.set('noaudio', '1');
             params.set('buffer2', '0');
             params.set('buffer', String(getCameraTargetDesiredBufferMs(userKey, target)));
@@ -2703,6 +2709,10 @@
             if (appState.obsMode) {
                 iframeParams.set('cleanoutput', '1');
                 iframeParams.set('autostart', '1');
+                // Without scene=0 this hidden iframe joins the room as a guest
+                // that never enters a scene, so it never actually publishes/
+                // discovers room peers for the OBS camera tiles to view.
+                iframeParams.set('scene', '0');
             }
             applyVdoTransportOverrideParams(iframeParams);
             return vdoIframeBaseUrl() + '?' + iframeParams.toString();
